@@ -1,16 +1,23 @@
-{-# LANGUAGE DeriveFunctor        #-}
-{-# LANGUAGE FlexibleContexts     #-}
-{-# LANGUAGE GADTs                #-}
-{-# LANGUAGE KindSignatures       #-}
-{-# LANGUAGE ScopedTypeVariables  #-}
-{-# LANGUAGE StandaloneDeriving   #-}
-{-# LANGUAGE TemplateHaskell      #-}
-{-# LANGUAGE TupleSections        #-}
-{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE DeriveFunctor         #-}
+{-# LANGUAGE ExplicitForAll        #-}
+{-# LANGUAGE FlexibleContexts      #-}
+{-# LANGUAGE FlexibleInstances     #-}
+{-# LANGUAGE GADTs                 #-}
+{-# LANGUAGE InstanceSigs          #-}
+{-# LANGUAGE KindSignatures        #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE ScopedTypeVariables   #-}
+{-# LANGUAGE StandaloneDeriving    #-}
+{-# LANGUAGE TemplateHaskell       #-}
+{-# LANGUAGE TupleSections         #-}
+{-# LANGUAGE TypeFamilies          #-}
+{-# LANGUAGE UndecidableInstances  #-}
 
-import           Control.Lens
-import           Control.Lens.TH
-import           Text.Read
+module April where
+
+---------------------------------------------------------------------------------
+-- free monad
+---------------------------------------------------------------------------------
 
 data Box f a = Box (f (Box f a)) | Core a
 
@@ -31,43 +38,94 @@ instance Functor f => Monad (Box f) where
         join (Core x) = x
         join (Box f)  = Box $ join <$> f
 
-data Par (f :: * -> *) a where
-    One :: a  -> Par f a
-    More ::  f (b -> a) -> Par f b -> Par f a
+class LiftF f c where
+  liftF :: f a -> c f a
 
-instance Functor f => Functor (Par f) where
-    fmap f (One x)    = One $ f x
-    fmap f (More c p) = More (fmap (f .) c) p
 
-instance Functor f => Applicative (Par f) where
-    pure = One
-    One g <*> One x = One $ g x
-    One g <*> x = g <$> x
-    {-More (c :: b -> a -> c) (g :: Par f b) <*> One (x :: a)
-        = More (uncurry c) $ fmap (, x) g
-    More (c :: b -> a -> c) (g :: Par f b)
-        <*> More  (c' :: d -> a) (g' :: Par f d)
-            = More (uncurry c) $ (,) <$> g <*> (c' <$> g')-}
-    More (c :: f (b -> a -> c)) (g :: Par f b) <*> y
-            = More (fmap uncurry c) $ (,) <$> g <*> (id <$> y)
-
-one :: Functor f => f a -> Par f a
-one x = More (fmap const x) $ One undefined
+instance Functor f => LiftF f Box where
+  liftF :: f a -> Box f a
+  liftF = Box . fmap Core
 
 ---------------------------------------------------------------------------------
+-- free applicative, if we have a functor , can we build an applicative structure
+-- out of it ? Call it Par :: (* -> *) -> * -> *
+-- <*> :: Par f (a -> b) -> Par f a -> Par f b
+-- For pure we just intoduce it with an ad hoc constructor: One
+-- The idea is to assoc a f (c -> a) * Par f c as type Par f a
+-- now the  <*> becomes (q :: f (c -> a -> b)) ->  (g :: Par f c)  -> (y :: Par f a) -> Par f b
+-- reusing the <*> we can zip Par f c and Par f a : (,) g <*> y
+-- then it's enough tu uncurry our reified applicatin to realize Par f b:
+---------------------------------------------------------------------------------
 
-data Elem a = Elem (String -> Maybe a) deriving Functor
 
-opt :: Read a => Elem a
-opt = Elem readMaybe
+type family R c (f :: * -> *) :: * -> *
+type family S c (f :: * -> *) :: * -> *
 
-optS :: Elem String
-optS = Elem Just
+data FreeAR c (f :: * -> *) a where
+    One :: a -> FreeAR c f a
+    More :: R c f (b -> a) -> S c f b -> FreeAR c f a
+
+class LiftAR c where
+    liftAR
+        :: (Functor f)
+            => f a -> FreeAR c f a
+    lowerAR ::
+        (Applicative f)
+            =>  FreeAR c f a -> f a
+
+instance (Functor (R c f), Functor f) => Functor (FreeAR c f) where
+    fmap f (One x)    = One $ f x
+    fmap f (More c p) = More ((f .) <$> c) p
+
+-- capriotti
+
+data Cap
+type instance R Cap f = f
+type instance S Cap f = FreeAR Cap f
 
 
-parse :: String -> Par Elem a -> Maybe a
-parse = parseEx . words
-    where
-    parseEx :: [String] -> Par Elem a -> Maybe a
-    parseEx _ (One x)                = Just x
-    parseEx (x:xs) (More (Elem r) p) = r x <*> parseEx xs p
+instance (Functor f)
+    => Applicative (FreeAR Cap f) where
+    pure = One
+    One f <*> x = f <$> x
+    More c g <*> y
+            = More (fmap uncurry c) $ (,) <$> g <*> y
+
+instance LiftAR Cap where
+  liftAR x = More (fmap const x) $
+    (One $ error "liftF is forgetful" :: FreeAR Cap f a)
+  lowerAR (One x)    = pure x
+  lowerAR (More g x) = g <*> lowerAR x
+
+--
+data Orian
+
+type instance R Orian f = FreeAR Orian f
+type instance S Orian f = f
+
+instance Functor f => Applicative (FreeAR Orian f) where
+      pure = One
+      tx <*> One y = fmap ($ y) tx
+      tx <*> More ty az = More ((.) <$> tx <*> ty) az
+
+instance LiftAR Orian where
+    liftAR = More $ One id
+    lowerAR (One x)      = pure x
+    lowerAR (More tx ay) = lowerAR tx <*> ay
+
+--
+data Twan
+
+type instance R Twan f = FreeAR Twan f
+type instance S Twan f = f
+
+instance Functor f => Applicative (FreeAR Twan f) where
+    pure = One
+    One f <*> tx = fmap f tx
+    More tx ay <*> tz = More (flip <$> tx <*> tz) ay
+
+instance LiftAR Twan where
+    liftAR = More $ One id
+    lowerAR (One x)      = pure x
+    lowerAR (More tx ay) = flip id <$> ay <*> lowerAR tx
+
